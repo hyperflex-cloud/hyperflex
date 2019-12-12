@@ -15,6 +15,7 @@ namespace Hyperf\DB;
 use Hyperf\DB\Pool\PoolFactory;
 use Hyperf\Utils\ApplicationContext;
 use Hyperf\Utils\Context;
+use Hyperf\Utils\Coroutine;
 use Throwable;
 
 /**
@@ -25,6 +26,9 @@ use Throwable;
  * @method execute(string $query, array $bindings = [])
  * @method query(string $query, array $bindings = [])
  * @method fetch(string $query, array $bindings = [])
+ * @method DB connection(string $pool = 'default')
+ * @method resetRecordsModified()
+ * @method bool getRecordsModified()
  */
 class DB
 {
@@ -46,6 +50,11 @@ class DB
 
     public function __call($name, $arguments)
     {
+        if ($name === 'connection') {
+            $this->poolName = $arguments[0] ?? 'default';
+            return $this;
+        }
+
         $hasContextConnection = Context::has($this->getContextKey());
         $connection = $this->getConnection($hasContextConnection);
 
@@ -56,10 +65,12 @@ class DB
             $result = $connection->retry($exception, $name, $arguments);
         } finally {
             if (! $hasContextConnection) {
-                if ($this->shouldUseSameConnection($name)) {
+                if ($this->shouldUseSameConnection($name) || $connection->getRecordsModified()) {
                     // Should storage the connection to coroutine context, then use defer() to release the connection.
                     Context::set($this->getContextKey(), $connection);
                     defer(function () use ($connection) {
+                        $this->poolName = 'default';
+                        $connection->resetRecordsModified();
                         $connection->release();
                     });
                 } else {
@@ -93,7 +104,7 @@ class DB
     }
 
     /**
-     * Get a connection from coroutine context, or from mysql connectio pool.
+     * Get a connection from coroutine context, or from mysql connection pool.
      */
     protected function getConnection(bool $hasContextConnection): AbstractConnection
     {

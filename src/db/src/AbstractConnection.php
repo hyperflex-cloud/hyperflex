@@ -15,6 +15,7 @@ namespace Hyperf\DB;
 use Hyperf\Contract\StdoutLoggerInterface;
 use Hyperf\Pool\Connection;
 use Hyperf\Pool\Exception\ConnectionException;
+use Hyperf\Utils\Arr;
 
 abstract class AbstractConnection extends Connection implements ConnectionInterface
 {
@@ -26,9 +27,31 @@ abstract class AbstractConnection extends Connection implements ConnectionInterf
      */
     protected $config = [];
 
+    /**
+     * @var array
+     */
+    protected $readConfig = [];
+
+    /**
+     * Indicates if changes have been made to the database.
+     *
+     * @var bool
+     */
+    protected $recordsModified = false;
+
     public function getConfig(): array
     {
         return $this->config;
+    }
+
+    /**
+     * Get the database connection name.
+     *
+     * @return null|string
+     */
+    public function getName()
+    {
+        return Arr::get($this->config, 'name');
     }
 
     public function release(): void
@@ -71,5 +94,120 @@ abstract class AbstractConnection extends Connection implements ConnectionInterf
         }
 
         throw $throwable;
+    }
+
+    /**
+     * Reset $recordsModified property to false.
+     */
+    public function resetRecordsModified(): void
+    {
+        $this->recordsModified = false;
+    }
+
+    /**
+     * Indicate if any records have been modified.
+     */
+    public function recordsHaveBeenModified(bool $value = true)
+    {
+        if (! $this->recordsModified) {
+            $this->recordsModified = $value;
+        }
+    }
+
+    /**
+     * get records modified.
+     */
+    public function getRecordsModified(): bool
+    {
+        return $this->recordsModified && Arr::get($this->config, 'sticky');
+    }
+
+    /**
+     * Get the elapsed time since a given starting point.
+     *
+     * @param int $start
+     * @return float
+     */
+    protected function getElapsedTime($start)
+    {
+        return round((microtime(true) - $start) * 1000, 2);
+    }
+
+    /**
+     * Parse the hosts configuration item into an array.
+     *
+     * @return array
+     */
+    protected function parseHosts(array $config)
+    {
+        $hosts = Arr::wrap($config['host']);
+
+        if (empty($hosts)) {
+            throw new \InvalidArgumentException('Database hosts array is empty.');
+        }
+
+        return $hosts;
+    }
+
+    /**
+     * Init read write config.
+     */
+    protected function initReadWriteConfig(array $config)
+    {
+        if (isset($config['read'])) {
+            $this->readConfig = $this->getReadConfig($config);
+        }
+        if (isset($config['write'])) {
+            $this->config = $this->getWriteConfig($config);
+        }
+    }
+
+    /**
+     * Get a read / write level configuration.
+     *
+     * @param string $type
+     * @return array
+     */
+    protected function getReadWriteConfig(array $config, $type)
+    {
+        return isset($config[$type][0])
+            ? Arr::random($config[$type])
+            : $config[$type];
+    }
+
+    /**
+     * Merge a configuration for a read / write connection.
+     *
+     * @return array
+     */
+    protected function mergeReadWriteConfig(array $config, array $merge)
+    {
+        return Arr::except(array_merge($config, $merge), ['read', 'write']);
+    }
+
+    /**
+     * Get the read configuration for a read / write connection.
+     *
+     * @return array
+     */
+    protected function getReadConfig(array $config)
+    {
+        return $this->mergeReadWriteConfig(
+            $config,
+            $this->getReadWriteConfig($config, 'read')
+        );
+    }
+
+    /**
+     * Get the read configuration for a read / write connection.
+     *
+     * @return array
+     */
+    protected function getWriteConfig(array $config)
+    {
+        return $this->mergeReadWriteConfig(
+            $config,
+            $this->getReadWriteConfig($config, 'write')
+        );
     }
 }

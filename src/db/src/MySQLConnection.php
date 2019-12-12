@@ -12,18 +12,26 @@ declare(strict_types=1);
 
 namespace Hyperf\DB;
 
+use Closure;
 use Hyperf\DB\Exception\RuntimeException;
 use Hyperf\Pool\Pool;
+use Hyperf\Utils\Arr;
 use Psr\Container\ContainerInterface;
 use Swoole\Coroutine\MySQL;
 use Swoole\Coroutine\MySQL\Statement;
+use Throwable;
 
 class MySQLConnection extends AbstractConnection
 {
     /**
-     * @var MySQL
+     * @var Closure|MySQL
      */
     protected $connection;
+
+    /**
+     * @var Closure|MySQL
+     */
+    protected $readConnection;
 
     /**
      * @var array
@@ -51,32 +59,28 @@ class MySQLConnection extends AbstractConnection
     {
         parent::__construct($container, $pool);
         $this->config = array_replace_recursive($this->config, $config);
+        $this->initReadWriteConfig($this->config);
         $this->reconnect();
     }
 
     public function __call($name, $arguments)
     {
-        return $this->connection->{$name}(...$arguments);
+        return $this->getReadWriteConnection()->{$name}(...$arguments);
     }
 
     /**
      * Reconnect the connection.
+     *
+     * @throws MySQL\Exception
+     * @throws Throwable
      */
     public function reconnect(): bool
     {
-        $connection = new MySQL();
-        $connection->connect([
-            'host' => $this->config['host'],
-            'port' => $this->config['port'],
-            'user' => $this->config['username'],
-            'password' => $this->config['password'],
-            'database' => $this->config['database'],
-            'timeout' => $this->config['pool']['connect_timeout'],
-            'charset' => $this->config['charset'],
-            'fetch_mode' => true,
-        ]);
+        if (! empty($this->readConfig)) {
+            $this->readConnection = $this->reconnectConnection($this->readConfig);
+        }
 
-        $this->connection = $connection;
+        $this->connection = $this->reconnectConnection($this->config);
         $this->lastUseTime = microtime(true);
 
         return true;
@@ -87,7 +91,7 @@ class MySQLConnection extends AbstractConnection
      */
     public function close(): bool
     {
-        unset($this->connection);
+        unset($this->connection, $this->readConnection);
 
         return true;
     }
@@ -98,6 +102,8 @@ class MySQLConnection extends AbstractConnection
 
         $statement->execute($bindings);
 
+        $this->recordsHaveBeenModified();
+
         return $statement->insert_id;
     }
 
@@ -107,17 +113,25 @@ class MySQLConnection extends AbstractConnection
 
         $statement->execute($bindings);
 
-        return $statement->affected_rows;
+        $this->recordsHaveBeenModified(
+            ($count = $statement->affected_rows) > 0
+        );
+
+        return $count;
     }
 
     public function exec(string $sql): int
     {
-        $res = $this->connection->query($sql);
+        $connection = $this->getReadWriteConnection();
+
+        $res = $connection->query($sql);
         if ($res === false) {
-            throw new RuntimeException($this->connection->error);
+            throw new RuntimeException($connection->error);
         }
 
-        return $this->connection->affected_rows;
+        $this->recordsHaveBeenModified($connection->affected_rows > 0);
+
+        return $connection->affected_rows;
     }
 
     public function query(string $query, array $bindings = []): array
@@ -125,7 +139,7 @@ class MySQLConnection extends AbstractConnection
         // For select statements, we'll simply execute the query and return an array
         // of the database result set. Each element in the array will be a single
         // row from the database table, and will either be an array or objects.
-        $statement = $this->prepare($query);
+        $statement = $this->prepare($query, true);
 
         $statement->execute($bindings);
 
@@ -142,26 +156,112 @@ class MySQLConnection extends AbstractConnection
     public function call(string $method, array $argument = [])
     {
         $timeout = $this->config['pool']['wait_timeout'];
+        $connection = $this->getReadWriteConnection();
         switch ($method) {
             case 'beginTransaction':
-                return $this->connection->begin($timeout);
+                return $connection->begin($timeout);
             case 'rollBack':
-                return $this->connection->rollback($timeout);
+                return $connection->rollback($timeout);
             case 'commit':
-                return $this->connection->commit($timeout);
+                return $connection->commit($timeout);
         }
 
-        return $this->connection->{$method}(...$argument);
+        return $connection->{$method}(...$argument);
     }
 
-    protected function prepare(string $query): Statement
+    protected function prepare(string $query, bool $read = false): Statement
     {
-        $statement = $this->connection->prepare($query);
+        $connection = $this->getReadWriteConnection($read);
+        $statement = $connection->prepare($query);
 
         if ($statement === false) {
-            throw new RuntimeException($this->connection->error);
+            throw new RuntimeException($connection->error);
         }
 
         return $statement;
+    }
+
+    /**
+     * reconnect Connection.
+     *
+     * @return Closure
+     */
+    protected function reconnectConnection(array $config)
+    {
+        return function () use ($config) {
+            foreach (Arr::shuffle($hosts = $this->parseHosts($config)) as $key => $host) {
+                $config['host'] = $host;
+                $config['fetch_mode'] = true;
+
+                try {
+                    $connection = new MySQL();
+
+                    $connection->connect([
+                        'host' => $config['host'],
+                        'port' => $config['port'],
+                        'user' => $config['username'],
+                        'password' => $config['password'],
+                        'database' => $config['database'],
+                        'timeout' => $config['pool']['connect_timeout'],
+                        'charset' => $config['charset'],
+                        'fetch_mode' => $config['fetch_mode'],
+                    ]);
+
+                    return $connection;
+                } catch (MySQL\Exception $e) {
+                    continue;
+                } catch (Throwable $e) {
+                    continue;
+                }
+            }
+
+            if (isset($e)) {
+                throw $e;
+            }
+            throw new RuntimeException('db connection config error');
+        };
+    }
+
+    /**
+     * @param bool $read
+     * @return MySQL
+     */
+    protected function getReadWriteConnection($read = false)
+    {
+        if ($read) {
+            return $this->getReadConnection();
+        }
+        return $this->getWriteConnection();
+    }
+
+    /**
+     * @return MySQL
+     */
+    protected function getWriteConnection()
+    {
+        if ($this->connection instanceof Closure) {
+            return $this->connection = call_user_func($this->connection);
+        }
+        return $this->connection;
+    }
+
+    /**
+     * @return MySQL
+     */
+    protected function getReadConnection()
+    {
+        if (is_null($this->readConnection)) {
+            return $this->getWriteConnection();
+        }
+
+        if ($this->recordsModified && Arr::get($this->config, 'sticky')) {
+            return $this->getWriteConnection();
+        }
+
+        if ($this->readConnection instanceof Closure) {
+            return $this->readConnection = call_user_func($this->readConnection);
+        }
+
+        return $this->readConnection;
     }
 }

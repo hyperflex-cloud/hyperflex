@@ -12,18 +12,26 @@ declare(strict_types=1);
 
 namespace Hyperf\DB;
 
-use Hyperf\Pool\Exception\ConnectionException;
+use Closure;
+use Hyperf\DB\Exception\RuntimeException;
 use Hyperf\Pool\Pool;
+use Hyperf\Utils\Arr;
 use PDO;
 use PDOStatement;
 use Psr\Container\ContainerInterface;
+use Throwable;
 
 class PDOConnection extends AbstractConnection
 {
     /**
-     * @var PDO
+     * @var Closure|PDO
      */
     protected $connection;
+
+    /**
+     * @var Closure|PDO
+     */
+    protected $readConnection;
 
     /**
      * @var array
@@ -65,34 +73,30 @@ class PDOConnection extends AbstractConnection
     {
         parent::__construct($container, $pool);
         $this->config = array_replace_recursive($this->config, $config);
+        $this->initReadWriteConfig($this->config);
         $this->reconnect();
     }
 
     public function __call($name, $arguments)
     {
-        return $this->connection->{$name}(...$arguments);
+        return $this->getReadWriteConnection()->{$name}(...$arguments);
     }
 
     /**
      * Reconnect the connection.
+     *
+     * @throws \PDOException
+     * @throws Throwable
      */
     public function reconnect(): bool
     {
-        $username = $this->config['username'];
-        $password = $this->config['password'];
-        $dsn = $this->buildDsn($this->config);
-        try {
-            $pdo = new \PDO($dsn, $username, $password, $this->config['options']);
-        } catch (\Throwable $e) {
-            throw new ConnectionException('Connection reconnect failed.:' . $e->getMessage());
+        if (! empty($this->readConfig)) {
+            $this->readConnection = $this->reconnectConnection($this->readConfig);
         }
 
-        $this->configureCharset($pdo, $this->config);
-
-        $this->configureTimezone($pdo, $this->config);
-
-        $this->connection = $pdo;
+        $this->connection = $this->reconnectConnection($this->config);
         $this->lastUseTime = microtime(true);
+
         return true;
     }
 
@@ -101,17 +105,19 @@ class PDOConnection extends AbstractConnection
      */
     public function close(): bool
     {
-        unset($this->connection);
+        unset($this->connection, $this->readConnection);
 
         return true;
     }
 
     public function query(string $query, array $bindings = []): array
     {
+        $connection = $this->getReadWriteConnection(true);
+
         // For select statements, we'll simply execute the query and return an array
         // of the database result set. Each element in the array will be a single
         // row from the database table, and will either be an array or objects.
-        $statement = $this->connection->prepare($query);
+        $statement = $connection->prepare($query);
 
         $this->bindValues($statement, $bindings);
 
@@ -131,34 +137,50 @@ class PDOConnection extends AbstractConnection
 
     public function execute(string $query, array $bindings = []): int
     {
-        $statement = $this->connection->prepare($query);
+        $connection = $this->getReadWriteConnection();
+
+        $statement = $connection->prepare($query);
 
         $this->bindValues($statement, $bindings);
 
         $statement->execute();
 
-        return $statement->rowCount();
+        $this->recordsHaveBeenModified(
+            ($count = $statement->rowCount()) > 0
+        );
+
+        return $count;
     }
 
     public function exec(string $sql): int
     {
-        return $this->connection->exec($sql);
+        $connection = $this->getReadWriteConnection();
+
+        $count = $connection->exec($sql);
+
+        $this->recordsHaveBeenModified($count > 0);
+
+        return $count;
     }
 
     public function insert(string $query, array $bindings = []): int
     {
-        $statement = $this->connection->prepare($query);
+        $connection = $this->getReadWriteConnection();
+
+        $statement = $connection->prepare($query);
 
         $this->bindValues($statement, $bindings);
 
         $statement->execute();
 
-        return (int) $this->connection->lastInsertId();
+        $this->recordsHaveBeenModified();
+
+        return (int) $connection->lastInsertId();
     }
 
     public function call(string $method, array $argument = [])
     {
-        return $this->connection->{$method}(...$argument);
+        return $this->getReadWriteConnection()->{$method}(...$argument);
     }
 
     /**
@@ -212,5 +234,91 @@ class PDOConnection extends AbstractConnection
         if (isset($config['timezone'])) {
             $connection->prepare(sprintf('set time_zone="%s"', $config['timezone']))->execute();
         }
+    }
+
+    /**
+     * reconnect Connection.
+     *
+     * @return Closure
+     */
+    protected function reconnectConnection(array $config)
+    {
+        return function () use ($config) {
+            foreach (Arr::shuffle($hosts = $this->parseHosts($config)) as $key => $host) {
+                $config['host'] = $host;
+
+                try {
+                    $username = $config['username'];
+                    $password = $config['password'];
+
+                    $dsn = $this->buildDsn($config);
+
+                    try {
+                        $connection = new \PDO($dsn, $username, $password, $this->config['options']);
+                    } catch (Throwable $e) {
+                        continue;
+                    }
+
+                    $this->configureCharset($connection, $config);
+
+                    $this->configureTimezone($connection, $config);
+
+                    return $connection;
+                } catch (\PDOException $e) {
+                    continue;
+                } catch (Throwable $e) {
+                    continue;
+                }
+            }
+
+            if (isset($e)) {
+                throw $e;
+            }
+            throw new RuntimeException('db connection config error');
+        };
+    }
+
+    /**
+     * @param bool $read
+     * @return PDO
+     */
+    protected function getReadWriteConnection($read = false)
+    {
+        if ($read) {
+            return $this->getReadConnection();
+        }
+        return $this->getWriteConnection();
+    }
+
+    /**
+     * @return PDO
+     */
+    protected function getWriteConnection()
+    {
+        if ($this->connection instanceof Closure) {
+            return $this->connection = call_user_func($this->connection);
+        }
+
+        return $this->connection;
+    }
+
+    /**
+     * @return PDO
+     */
+    protected function getReadConnection()
+    {
+        if (is_null($this->readConnection)) {
+            return $this->getWriteConnection();
+        }
+
+        if ($this->recordsModified && Arr::get($this->config, 'sticky')) {
+            return $this->getWriteConnection();
+        }
+
+        if ($this->readConnection instanceof Closure) {
+            return $this->readConnection = call_user_func($this->readConnection);
+        }
+
+        return $this->readConnection;
     }
 }
