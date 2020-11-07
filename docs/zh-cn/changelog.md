@@ -1,5 +1,63 @@
 # 版本更新记录
 
+# v2.0.17 - 2020-11-02
+
+## 新增
+
+- [#2625](https://github.com/hyperf/hyperf/pull/2625) 新增 `Hyperf\Tracer\Aspect\JsonRpcAspect`, 可以让 `Tracer` 组件支持 `JsonRPC` 的链路追踪。
+- [#2709](https://github.com/hyperf/hyperf/pull/2709) [#2733](https://github.com/hyperf/hyperf/pull/2733) 为 `Model` 新增了对应的 `@mixin` 注释，提升模型的静态方法提示能力。
+- [#2726](https://github.com/hyperf/hyperf/pull/2726) [#2733](https://github.com/hyperf/hyperf/pull/2733) 为 `gen:model` 脚本增加可选项 `--with-ide`, 可以生成对应的 `IDE` 文件。
+- [#2737](https://github.com/hyperf/hyperf/pull/2737) 新增 [view-engine](https://github.com/hyperf/view-engine) 组件，可以不需要在 `Task` 进程中渲染页面。
+
+## 修复
+
+- [#2719](https://github.com/hyperf/hyperf/pull/2719) 修复 `Arr::merge` 会因 `array1` 中不包含 `array2` 中存在的 `$key` 时，导致的报错问题。
+- [#2723](https://github.com/hyperf/hyperf/pull/2723) 修复 `Paginator::resolveCurrentPath` 无法正常工作的问题。
+
+## 优化
+
+- [#2746](https://github.com/hyperf/hyperf/pull/2746) 优化 `@Task` 注解，只会在 `worker` 进程中执行时，会投递到 `task` 进程执行对应逻辑，其他进程则会降级为同步执行。
+
+## 变更
+
+- [#2728](https://github.com/hyperf/hyperf/pull/2728) `JsonRPC` 中，以 `__` 为前缀的方法，都不会在注册到 `RPC` 服务中，例如 `__construct`, '__call'。
+
+# v2.0.16 - 2020-10-26
+
+## 新增
+
+- [#2682](https://github.com/hyperf/hyperf/pull/2682) 为 `CacheableInterface` 新增方法 `getCacheTTL` 可根据不同模型设置不同的缓存时间。
+- [#2696](https://github.com/hyperf/hyperf/pull/2696) 新增 Swoole Tracker 的内存检测工具。
+
+## 修复
+
+- [#2680](https://github.com/hyperf/hyperf/pull/2680) 修复 `CastsValue` 因为没有设置 `$isSynchronized` 默认值，导致的类型错误。
+- [#2680](https://github.com/hyperf/hyperf/pull/2680) 修复 `CastsValue` 中 `$items` 默认值会被 `__construct` 覆盖的问题。
+- [#2693](https://github.com/hyperf/hyperf/pull/2693) 修复 `hyperf/retry` 组件，`Budget` 表现不符合期望的问题。
+- [#2695](https://github.com/hyperf/hyperf/pull/2695) 修复方法 `Container::define()` 因为容器中的对象已被实例化，而无法重定义的问题。
+
+## 优化
+
+- [#2611](https://github.com/hyperf/hyperf/pull/2611) 优化 `hyperf/watcher` 组件 `FindDriver` ，使其可以在 `Alpine` 镜像中使用。
+- [#2662](https://github.com/hyperf/hyperf/pull/2662) 优化 `Amqp` 消费者进程，使其可以配合 `Signal` 组件安全停止。
+- [#2690](https://github.com/hyperf/hyperf/pull/2690) 优化 `hyperf/tracer` 组件，确保其可以正常执行 `finish` 和 `flush` 方法。
+
+# v2.0.15 - 2020-10-19
+
+## 新增
+
+- [#2654](https://github.com/hyperf/hyperf/pull/2654) 新增方法 `Hyperf\Utils\Resource::from`，可以方便的将 `string` 转化为 `resource`。
+
+## 修复
+
+- [#2634](https://github.com/hyperf/hyperf/pull/2634) [#2640](https://github.com/hyperf/hyperf/pull/2640) 修复 `snowflake` 组件中，元数据生成器 `RedisSecondMetaGenerator` 会产生相同元数据的问题。
+- [#2639](https://github.com/hyperf/hyperf/pull/2639) 修复 `json-rpc` 组件中，异常无法正常被序列化的问题。
+- [#2643](https://github.com/hyperf/hyperf/pull/2643) 修复 `scout:flush` 执行失败的问题。
+
+## 优化
+
+- [#2656](https://github.com/hyperf/hyperf/pull/2656) 优化了 `json-rpc` 组件中，参数解析失败后，也可以返回对应的错误信息。
+
 # v2.0.14 - 2020-10-12
 
 ## 新增
